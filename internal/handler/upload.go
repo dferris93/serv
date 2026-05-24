@@ -17,9 +17,10 @@ import (
 )
 
 type uploadFileResult struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+	HTTPStatus int    `json:"-"`
 }
 
 type uploadResponse struct {
@@ -29,14 +30,14 @@ type uploadResponse struct {
 }
 
 func (h *Handler) handleUpload(rw *logging.ResponseWriter, r *http.Request, ctx *security.RequestContext) {
-	if !h.UploadEnabled {
-		http.Error(rw, "405 method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	target, err := h.resolveUploadTarget(ctx.RelPath)
 	if err != nil {
 		http.Error(rw, "404 not found", http.StatusNotFound)
+		return
+	}
+
+	if !h.UploadEnabled && !target.OneTimeUpload {
+		http.Error(rw, "405 method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -52,29 +53,30 @@ func (h *Handler) handleUpload(rw *logging.ResponseWriter, r *http.Request, ctx 
 }
 
 type uploadTarget struct {
-	TargetDir string
-	RelDir    string
-	FileName  string
+	TargetDir     string
+	RelDir        string
+	FileName      string
+	OneTimeUpload bool
 }
 
 func (h *Handler) resolveUploadTarget(relPath string) (uploadTarget, error) {
 	targetDir := filepath.Join(h.Dir, filepath.FromSlash(relPath))
 	if info, err := os.Stat(targetDir); err == nil {
 		if info.IsDir() {
-			return uploadTarget{
+			return h.withUploadPolicy(uploadTarget{
 				TargetDir: targetDir,
 				RelDir:    relPath,
-			}, nil
+			}), nil
 		}
 		relDir := path.Dir(relPath)
 		if relDir == "." {
 			relDir = ""
 		}
-		return uploadTarget{
+		return h.withUploadPolicy(uploadTarget{
 			TargetDir: filepath.Dir(targetDir),
 			RelDir:    relDir,
 			FileName:  path.Base(relPath),
-		}, nil
+		}), nil
 	} else if !os.IsNotExist(err) {
 		return uploadTarget{}, err
 	}
@@ -96,11 +98,16 @@ func (h *Handler) resolveUploadTarget(relPath string) (uploadTarget, error) {
 		return uploadTarget{}, os.ErrNotExist
 	}
 
-	return uploadTarget{
+	return h.withUploadPolicy(uploadTarget{
 		TargetDir: parentDir,
 		RelDir:    relDir,
 		FileName:  path.Base(relPath),
-	}, nil
+	}), nil
+}
+
+func (h *Handler) withUploadPolicy(target uploadTarget) uploadTarget {
+	target.OneTimeUpload = h.isOneTimeUploadDir(target.TargetDir)
+	return target
 }
 
 func (h *Handler) handleDirectoryUpload(rw *logging.ResponseWriter, r *http.Request, target uploadTarget) {
@@ -134,7 +141,7 @@ func (h *Handler) handleDirectoryUpload(rw *logging.ResponseWriter, r *http.Requ
 
 	resp := uploadResponse{Files: make([]uploadFileResult, 0, len(files))}
 	for _, fileHeader := range files {
-		result := h.storeUploadedFile(target.TargetDir, target.RelDir, fileHeader)
+		result := h.storeUploadedFile(target, fileHeader)
 		resp.Files = append(resp.Files, result)
 		if result.Status == "uploaded" {
 			resp.Uploaded++
@@ -211,7 +218,7 @@ func (h *Handler) handleSingleFileUpload(rw *logging.ResponseWriter, r *http.Req
 		}
 		defer src.Close()
 
-		result := h.storeUploadedContent(target.TargetDir, target.RelDir, fileName, src)
+		result := h.storeUploadedContent(target, fileName, src)
 		status := http.StatusCreated
 		resp := uploadResponse{
 			Files: []uploadFileResult{result},
@@ -220,13 +227,13 @@ func (h *Handler) handleSingleFileUpload(rw *logging.ResponseWriter, r *http.Req
 			resp.Uploaded = 1
 		} else {
 			resp.Failed = 1
-			status = http.StatusBadRequest
+			status = uploadFailureStatus(result)
 		}
 		h.writeUploadResponse(rw, status, resp)
 		return
 	}
 
-	result := h.storeUploadedContent(target.TargetDir, target.RelDir, fileName, r.Body)
+	result := h.storeUploadedContent(target, fileName, r.Body)
 	status := http.StatusCreated
 	resp := uploadResponse{
 		Files: []uploadFileResult{result},
@@ -235,12 +242,12 @@ func (h *Handler) handleSingleFileUpload(rw *logging.ResponseWriter, r *http.Req
 		resp.Uploaded = 1
 	} else {
 		resp.Failed = 1
-		status = http.StatusBadRequest
+		status = uploadFailureStatus(result)
 	}
 	h.writeUploadResponse(rw, status, resp)
 }
 
-func (h *Handler) storeUploadedFile(targetDir string, relDir string, fileHeader *multipart.FileHeader) uploadFileResult {
+func (h *Handler) storeUploadedFile(target uploadTarget, fileHeader *multipart.FileHeader) uploadFileResult {
 	name, err := sanitizeUploadFilename(fileHeader.Filename)
 	if err != nil {
 		return uploadFileResult{Name: fileHeader.Filename, Status: "error", Message: err.Error()}
@@ -252,28 +259,70 @@ func (h *Handler) storeUploadedFile(targetDir string, relDir string, fileHeader 
 	}
 	defer src.Close()
 
-	return h.storeUploadedContent(targetDir, relDir, name, src)
+	return h.storeUploadedContent(target, name, src)
 }
 
-func (h *Handler) storeUploadedContent(targetDir string, relDir string, name string, src io.Reader) uploadFileResult {
+func (h *Handler) storeUploadedContent(target uploadTarget, name string, src io.Reader) uploadFileResult {
 	relPath := name
-	if relDir != "" {
-		relPath = path.Join(relDir, name)
+	if target.RelDir != "" {
+		relPath = path.Join(target.RelDir, name)
 	}
 
 	if err := h.checkUploadACLs(relPath); err != nil {
 		return uploadFileResult{Name: name, Status: "error", Message: err.Error()}
 	}
 
-	dstPath := filepath.Join(targetDir, name)
-	if err := writeUploadedFile(dstPath, src, h.UploadOverwrite); err != nil {
+	dstPath := filepath.Join(target.TargetDir, name)
+	key, err := filepath.Abs(dstPath)
+	if err != nil {
+		return uploadFileResult{Name: name, Status: "error", Message: "upload failed"}
+	}
+	key = filepath.Clean(key)
+	if !h.claimUpload(key) {
+		return uploadFileResult{Name: name, Status: "error", Message: "upload failed"}
+	}
+	defer h.releaseUpload(key)
+
+	overwrite := h.UploadOverwrite && !target.OneTimeUpload
+	if err := writeUploadedFile(dstPath, src, overwrite); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return uploadFileResult{Name: name, Status: "error", Message: "request entity too large", HTTPStatus: http.StatusRequestEntityTooLarge}
+		}
 		if errors.Is(err, os.ErrExist) {
-			return uploadFileResult{Name: name, Status: "error", Message: "file already exists"}
+			return uploadFileResult{Name: name, Status: "error", Message: "upload failed"}
 		}
 		return uploadFileResult{Name: name, Status: "error", Message: "failed to write file"}
 	}
 
 	return uploadFileResult{Name: name, Status: "uploaded"}
+}
+
+func (h *Handler) claimUpload(key string) bool {
+	h.uploadMu.Lock()
+	defer h.uploadMu.Unlock()
+
+	if h.uploadActive == nil {
+		h.uploadActive = make(map[string]struct{})
+	}
+	if _, ok := h.uploadActive[key]; ok {
+		return false
+	}
+	h.uploadActive[key] = struct{}{}
+	return true
+}
+
+func (h *Handler) releaseUpload(key string) {
+	h.uploadMu.Lock()
+	defer h.uploadMu.Unlock()
+	delete(h.uploadActive, key)
+}
+
+func uploadFailureStatus(result uploadFileResult) int {
+	if result.HTTPStatus != 0 {
+		return result.HTTPStatus
+	}
+	return http.StatusBadRequest
 }
 
 func (h *Handler) checkUploadACLs(relPath string) error {

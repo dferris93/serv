@@ -51,6 +51,10 @@ Once, the program is running, point your browser to http://127.0.0.1:8889
     	Path to private key file for TLS (optional)
   -log string
     	Log file path (empty for stdout)
+  -otd value
+        Directory whose files are deleted after one successful GET. Can specify multiple.
+  -otu value
+        Directory that accepts one-time uploads and blocks downloads. Can specify multiple.
   -password string
     	Password for basic auth (optional). Use env:VAR to read from an environment variable or file:/path/to/file to read JSON credentials.
   -port int
@@ -125,6 +129,20 @@ echo "password: admin" >> /path/to/served/.htaccess
 ```
 ./serv -cacert server.crt -key server.key -username admin -password admin
 ```
+
+* Delete files after one successful download
+```
+mkdir -p /path/to/served/once
+./serv -dir /path/to/served -otd once
+```
+Files under `once` are deleted after a successful full `GET`. `HEAD`, conditional `304`, and range `206` responses do not delete the file.
+
+* Accept uploads without allowing downloads
+```
+mkdir -p /path/to/served/drop
+./serv -dir /path/to/served -otu drop
+```
+Directories configured with `-otu` show the upload UI, hide all entries, block direct file downloads, and reject uploads that would overwrite a file.
 
 * TLS cert auth
 ```
@@ -203,8 +221,10 @@ curl -X POST --data-binary @./image.png  http://127.0.0.1:8889/uploads/image.png
 * serv will look for an index.html file, if it isn't found, it will serve the entire directory.
 * `-filter` patterns also block direct access by URL (404).
 * Uploads are disabled by default; enable with `-upload`.
+* `-otu` enables uploads only for the configured write-only directories, even when `-upload` is not set.
 * Uploads respect ACLs and security rules, including auth/IP restrictions, `-filter` patterns, dotfile policy, and sensitive file protections.
 * Upload requests can target a directory with multipart form data, or a specific file path via `POST /path/to/<filename>`.
+* `-otu` directories always reject overwrites, even when `-uploadoverwrite` is set.
 * `.htaccess` uploads are always blocked.
 * custom headers will only be set if the request is successful
 * Access logs use Common Log Format (CLF):

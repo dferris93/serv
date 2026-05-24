@@ -159,6 +159,42 @@ func TestDirListingUploadUIVisibility(t *testing.T) {
 	}
 }
 
+func TestDirListingOneTimeUploadHidesEntriesAndShowsUploadUI(t *testing.T) {
+	dir := t.TempDir()
+	dropDir := filepath.Join(dir, "drop")
+	if err := os.Mkdir(dropDir, 0o700); err != nil {
+		t.Fatalf("mkdir drop: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dropDir, "hidden.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+	oneTimeUploadDirs, err := ResolveOneTimeUploadDirs(dir, []string{"drop"})
+	if err != nil {
+		t.Fatalf("resolve one-time upload dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeUploadDirs = oneTimeUploadDirs
+
+	req := httptest.NewRequest(http.MethodGet, "/drop/", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Drop files to upload") {
+		t.Fatalf("expected upload UI")
+	}
+	if strings.Contains(body, "hidden.txt") {
+		t.Fatalf("did not expect upload-only file in listing")
+	}
+	if strings.Contains(body, "<table>") {
+		t.Fatalf("did not expect file listing table")
+	}
+}
+
 func TestDirListingSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	alphaDir := filepath.Join(dir, "alpha")

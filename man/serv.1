@@ -84,6 +84,17 @@ Set to 0 for unlimited request size.
 .TP
 .BR \-uploadoverwrite
 Allow uploaded files to overwrite existing files.
+.TP
+.BR \-otd " " \fIPATH\fR
+Directory whose files are deleted after one successful full GET.
+Can specify multiple. Relative paths are resolved under the served directory.
+HEAD, conditional 304, and range 206 responses do not delete the file.
+.TP
+.BR \-otu " " \fIPATH\fR
+Directory that accepts one-time uploads and blocks downloads.
+Can specify multiple. Relative paths are resolved under the served directory.
+These directories show upload controls, hide all entries, reject overwrites,
+and return 404 for direct file downloads.
 .SH HTACCESS
 If a .htaccess file exists in a directory (or any parent up to the served root),
 its username/password override the CLI \-username/\-password for that subtree.
@@ -118,6 +129,22 @@ Serve with basic auth loaded from a JSON file:
 .RS
 .nf
 serv -username file:/tmp/serv-creds.json -password file:/tmp/serv-creds.json
+.fi
+.RE
+.PP
+Serve files from a directory once, then remove them:
+.PP
+.RS
+.nf
+serv -dir /srv/share -otd once
+.fi
+.RE
+.PP
+Accept uploads without allowing downloads:
+.PP
+.RS
+.nf
+serv -dir /srv/share -otu drop
 .fi
 .RE
 .PP

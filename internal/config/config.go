@@ -9,25 +9,27 @@ import (
 )
 
 type Config struct {
-	Port            int
-	ListenIP        string
-	LogFile         string
-	Directory       string
-	CACertFile      string
-	CertFile        string
-	KeyFile         string
-	ClientCertAuth  bool
-	Username        string
-	Password        string
-	AllowInsecure   bool
-	AllowDotFiles   bool
-	AllowedIPs      []string
-	Headers         map[string]string
-	Redirects       map[string]string
-	FilterGlobs     []string
-	UploadEnabled   bool
-	UploadMaxMB     int
-	UploadOverwrite bool
+	Port                int
+	ListenIP            string
+	LogFile             string
+	Directory           string
+	CACertFile          string
+	CertFile            string
+	KeyFile             string
+	ClientCertAuth      bool
+	Username            string
+	Password            string
+	AllowInsecure       bool
+	AllowDotFiles       bool
+	AllowedIPs          []string
+	Headers             map[string]string
+	Redirects           map[string]string
+	FilterGlobs         []string
+	UploadEnabled       bool
+	UploadMaxMB         int
+	UploadOverwrite     bool
+	OneTimeDownloadDirs []string
+	OneTimeUploadDirs   []string
 }
 
 type multiValueFlag []string
@@ -111,28 +113,36 @@ func Parse() (Config, error) {
 	var filtersFlag multiValueFlag
 	flag.Var(&filtersFlag, "filter", "Glob patterns to hide from directory listings and block direct access. Can specify multiple.")
 
+	var oneTimeDownloadDirsFlag multiValueFlag
+	flag.Var(&oneTimeDownloadDirsFlag, "otd", "Directory whose files are deleted after one successful GET. Can specify multiple.")
+
+	var oneTimeUploadDirsFlag multiValueFlag
+	flag.Var(&oneTimeUploadDirsFlag, "otu", "Directory that accepts one-time uploads and blocks downloads. Can specify multiple.")
+
 	flag.Parse()
 
 	cfg := Config{
-		Port:            *port,
-		ListenIP:        *listenIP,
-		LogFile:         *logFile,
-		Directory:       *directory,
-		CACertFile:      *CACertFile,
-		CertFile:        *certFile,
-		KeyFile:         *keyFile,
-		ClientCertAuth:  *clientCertAuth,
-		Username:        *username,
-		Password:        *password,
-		AllowInsecure:   *allowInsecure,
-		AllowDotFiles:   *allowDotFiles,
-		AllowedIPs:      splitCommaList(*allowedIPs),
-		Headers:         makeMap(headersFlag),
-		Redirects:       makeMap(redirectsFlag),
-		FilterGlobs:     filtersFlag,
-		UploadEnabled:   *uploadEnabled,
-		UploadMaxMB:     *uploadMaxMB,
-		UploadOverwrite: *uploadOverwrite,
+		Port:                *port,
+		ListenIP:            *listenIP,
+		LogFile:             *logFile,
+		Directory:           *directory,
+		CACertFile:          *CACertFile,
+		CertFile:            *certFile,
+		KeyFile:             *keyFile,
+		ClientCertAuth:      *clientCertAuth,
+		Username:            *username,
+		Password:            *password,
+		AllowInsecure:       *allowInsecure,
+		AllowDotFiles:       *allowDotFiles,
+		AllowedIPs:          splitCommaList(*allowedIPs),
+		Headers:             makeMap(headersFlag),
+		Redirects:           makeMap(redirectsFlag),
+		FilterGlobs:         filtersFlag,
+		UploadEnabled:       *uploadEnabled,
+		UploadMaxMB:         *uploadMaxMB,
+		UploadOverwrite:     *uploadOverwrite,
+		OneTimeDownloadDirs: oneTimeDownloadDirsFlag,
+		OneTimeUploadDirs:   oneTimeUploadDirsFlag,
 	}
 
 	return cfg, nil

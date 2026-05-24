@@ -64,6 +64,8 @@ setup_site() {
   mkdir -p "${SITE_DIR}/broken"
   mkdir -p "${SITE_DIR}/subauth"
   mkdir -p "${SITE_DIR}/uploads"
+  mkdir -p "${SITE_DIR}/otd"
+  mkdir -p "${SITE_DIR}/drop"
   mkdir -p "${TMP_DIR}/outside"
   echo "hello" >"${SITE_DIR}/hello.txt"
   echo "secret" >"${SITE_DIR}/.hidden"
@@ -72,6 +74,8 @@ setup_site() {
   echo "protected" >"${SITE_DIR}/protected/secret.txt"
   echo "broken" >"${SITE_DIR}/broken/file.txt"
   echo "subauth" >"${SITE_DIR}/subauth/secret.txt"
+  echo "download once" >"${SITE_DIR}/otd/once.txt"
+  echo "existing upload" >"${SITE_DIR}/drop/existing.txt"
   cat >"${SITE_DIR}/protected/.htaccess" <<'EOF'
 username: ht
 password: pass
@@ -488,6 +492,42 @@ main() {
   if [[ "${HARDLINK_READY}" == "1" ]]; then
     expect_status "403" "http://127.0.0.1:${port}/hardlink.txt"
   fi
+  stop_server
+
+  log "testing one-time downloads"
+  start_server_retry -otd otd
+  port="${SERVER_PORT}"
+  wait_for_url "http://127.0.0.1:${port}/hello.txt"
+  expect_body "download once" "http://127.0.0.1:${port}/otd/once.txt"
+  expect_file_absent "${SITE_DIR}/otd/once.txt"
+  expect_status "404" "http://127.0.0.1:${port}/otd/once.txt"
+  stop_server
+
+  log "testing one-time uploads"
+  start_server_retry -otu drop -uploadoverwrite
+  port="${SERVER_PORT}"
+  wait_for_url "http://127.0.0.1:${port}/hello.txt"
+  expect_listing_absent "existing.txt" "http://127.0.0.1:${port}/drop/"
+  local otu_source otu_target otu_name otu_response otu_code
+  otu_source="${TMP_DIR}/one-time-upload-source.txt"
+  otu_name="new-upload.txt"
+  otu_target="${SITE_DIR}/drop/${otu_name}"
+  otu_response="${TMP_DIR}/one-time-upload-response.json"
+  printf "one-time upload payload" >"${otu_source}"
+  otu_code="$(curl --silent --show-error --output "${otu_response}" --write-out "%{http_code}" \
+    -X POST --data-binary "@${otu_source}" "http://127.0.0.1:${port}/drop/${otu_name}")"
+  if [[ "${otu_code}" != "201" ]]; then
+    fail "expected HTTP 201 for one-time upload, got ${otu_code} body=$(cat "${otu_response}")"
+  fi
+  expect_file_content "one-time upload payload" "${otu_target}"
+  expect_status "404" "http://127.0.0.1:${port}/drop/${otu_name}"
+  expect_listing_absent "${otu_name}" "http://127.0.0.1:${port}/drop/"
+  otu_code="$(curl --silent --show-error --output "${otu_response}" --write-out "%{http_code}" \
+    -X POST --data-binary "@${otu_source}" "http://127.0.0.1:${port}/drop/existing.txt")"
+  if [[ "${otu_code}" != "400" ]]; then
+    fail "expected HTTP 400 for one-time upload overwrite, got ${otu_code} body=$(cat "${otu_response}")"
+  fi
+  expect_file_content "existing upload" "${SITE_DIR}/drop/existing.txt"
   stop_server
 
   log "testing HTTP allowdotfiles + insecure"

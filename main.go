@@ -51,27 +51,45 @@ func main() {
 		os.Exit(1)
 	}
 
+	oneTimeDownloadDirs, err := handler.ResolveOneTimeDownloadDirs(dir, cfg.OneTimeDownloadDirs)
+	if err != nil {
+		log.Printf("Error configuring one-time download directories: %v", err)
+		os.Exit(1)
+	}
+
+	oneTimeUploadDirs, err := handler.ResolveOneTimeUploadDirs(dir, cfg.OneTimeUploadDirs)
+	if err != nil {
+		log.Printf("Error configuring one-time upload directories: %v", err)
+		os.Exit(1)
+	}
+	if err := handler.ValidateOneTimeDirSeparation(oneTimeDownloadDirs, oneTimeUploadDirs); err != nil {
+		log.Printf("Error configuring one-time directories: %v", err)
+		os.Exit(1)
+	}
+
 	credentialFileCache := map[string]basicAuthCredentials{}
 	username := resolveCredentialValue(logger, "username", cfg.Username, false, credentialFileCache)
 	password := resolveCredentialValue(logger, "password", cfg.Password, true, credentialFileCache)
 
 	h := &handler.Handler{
-		Dir:             dir,
-		AllowInsecure:   cfg.AllowInsecure,
-		AllowDotFiles:   cfg.AllowDotFiles,
-		AllowedIPs:      ipChecker,
-		Sensitive:       sensitiveFiles,
-		Username:        username,
-		Password:        password,
-		Headers:         cfg.Headers,
-		Redirects:       cfg.Redirects,
-		FilterGlobs:     cfg.FilterGlobs,
-		RequestChecks:   security.DefaultRequestChecks(),
-		EntryFilters:    security.DefaultEntryFilters(),
-		UploadEnabled:   cfg.UploadEnabled,
-		UploadMaxBytes:  maxUploadBytes(cfg.UploadMaxMB),
-		UploadOverwrite: cfg.UploadOverwrite,
-		Logger:          logger,
+		Dir:                 dir,
+		AllowInsecure:       cfg.AllowInsecure,
+		AllowDotFiles:       cfg.AllowDotFiles,
+		AllowedIPs:          ipChecker,
+		Sensitive:           sensitiveFiles,
+		Username:            username,
+		Password:            password,
+		Headers:             cfg.Headers,
+		Redirects:           cfg.Redirects,
+		FilterGlobs:         cfg.FilterGlobs,
+		RequestChecks:       security.DefaultRequestChecks(),
+		EntryFilters:        security.DefaultEntryFilters(),
+		UploadEnabled:       cfg.UploadEnabled,
+		UploadMaxBytes:      maxUploadBytes(cfg.UploadMaxMB),
+		UploadOverwrite:     cfg.UploadOverwrite,
+		OneTimeDownloadDirs: oneTimeDownloadDirs,
+		OneTimeUploadDirs:   oneTimeUploadDirs,
+		Logger:              logger,
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.ListenIP, cfg.Port)

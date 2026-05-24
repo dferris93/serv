@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"serv/internal/security"
@@ -81,6 +82,123 @@ func TestHandlerServesFile(t *testing.T) {
 	}
 	if body := rr.Body.String(); body != "hello" {
 		t.Fatalf("unexpected body: %q", body)
+	}
+}
+
+func TestHandlerDeletesOneTimeDownloadAfterSuccessfulGet(t *testing.T) {
+	dir := t.TempDir()
+	otdDir := filepath.Join(dir, "otd")
+	if err := os.Mkdir(otdDir, 0o700); err != nil {
+		t.Fatalf("mkdir otd: %v", err)
+	}
+	path := filepath.Join(otdDir, "once.txt")
+	if err := os.WriteFile(path, []byte("once"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	otdDirs, err := ResolveOneTimeDownloadDirs(dir, []string{"otd"})
+	if err != nil {
+		t.Fatalf("resolve one-time dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeDownloadDirs = otdDirs
+
+	req := httptest.NewRequest(http.MethodGet, "/otd/once.txt", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != "once" {
+		t.Fatalf("unexpected body: %q", body)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected one-time file to be deleted, stat err=%v", err)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after one-time download, got %d", rr.Code)
+	}
+}
+
+func TestHandlerOneTimeDownloadIgnoresHeadAndRange(t *testing.T) {
+	dir := t.TempDir()
+	otdDir := filepath.Join(dir, "otd")
+	if err := os.Mkdir(otdDir, 0o700); err != nil {
+		t.Fatalf("mkdir otd: %v", err)
+	}
+	path := filepath.Join(otdDir, "once.txt")
+	if err := os.WriteFile(path, []byte("once"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	otdDirs, err := ResolveOneTimeDownloadDirs(dir, []string{"otd"})
+	if err != nil {
+		t.Fatalf("resolve one-time dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeDownloadDirs = otdDirs
+
+	req := httptest.NewRequest(http.MethodHead, "/otd/once.txt", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected HEAD 200, got %d", rr.Code)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file to remain after HEAD: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/otd/once.txt", nil)
+	req.Header.Set("Range", "bytes=0-1")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("expected range 206, got %d", rr.Code)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file to remain after partial content: %v", err)
+	}
+}
+
+func TestResolveOneTimeDownloadDirsRejectsOutsideRoot(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "served")
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir served: %v", err)
+	}
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+
+	if _, err := ResolveOneTimeDownloadDirs(dir, []string{outside}); err == nil {
+		t.Fatalf("expected absolute outside directory to be rejected")
+	}
+	if _, err := ResolveOneTimeDownloadDirs(dir, []string{"../outside"}); err == nil {
+		t.Fatalf("expected relative outside directory to be rejected")
+	}
+}
+
+func TestValidateOneTimeDirSeparationRejectsOverlaps(t *testing.T) {
+	root := t.TempDir()
+	downloads := []string{filepath.Join(root, "once")}
+	uploads := []string{filepath.Join(root, "once")}
+	if err := ValidateOneTimeDirSeparation(downloads, uploads); err == nil {
+		t.Fatalf("expected same directory overlap to be rejected")
+	}
+
+	uploads = []string{filepath.Join(root, "once", "drop")}
+	if err := ValidateOneTimeDirSeparation(downloads, uploads); err == nil {
+		t.Fatalf("expected nested upload directory overlap to be rejected")
+	}
+
+	uploads = []string{filepath.Join(root, "drop")}
+	if err := ValidateOneTimeDirSeparation(downloads, uploads); err != nil {
+		t.Fatalf("expected separate directories to be allowed: %v", err)
 	}
 }
 
@@ -299,6 +417,165 @@ func TestHandlerUploadMultipleFiles(t *testing.T) {
 		if string(data) != file.Content {
 			t.Fatalf("uploaded file %s content = %q, want %q", file.Name, string(data), file.Content)
 		}
+	}
+}
+
+func TestHandlerUploadSerializesSameDestination(t *testing.T) {
+	dir := t.TempDir()
+	h := newTestHandler(dir)
+	h.UploadOverwrite = true
+
+	firstReader, firstWriter := io.Pipe()
+	firstStarted := make(chan struct{})
+	firstDone := make(chan uploadFileResult, 1)
+	var closeOnce sync.Once
+	closeFirst := func() {
+		closeOnce.Do(func() {
+			_ = firstWriter.Close()
+		})
+	}
+	defer closeFirst()
+
+	go func() {
+		close(firstStarted)
+		firstDone <- h.storeUploadedContent(uploadTarget{
+			TargetDir: dir,
+			FileName:  "same.txt",
+		}, "same.txt", firstReader)
+	}()
+
+	<-firstStarted
+	second := h.storeUploadedContent(uploadTarget{
+		TargetDir: dir,
+		FileName:  "same.txt",
+	}, "same.txt", strings.NewReader("second"))
+
+	if second.Status != "error" || second.Message != "upload failed" {
+		t.Fatalf("expected concurrent upload to fail generically, got %+v", second)
+	}
+
+	if _, err := firstWriter.Write([]byte("first")); err != nil {
+		t.Fatalf("write first upload: %v", err)
+	}
+	closeFirst()
+
+	first := <-firstDone
+	if first.Status != "uploaded" {
+		t.Fatalf("expected first upload to succeed, got %+v", first)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "same.txt"))
+	if err != nil {
+		t.Fatalf("read uploaded file: %v", err)
+	}
+	if string(data) != "first" {
+		t.Fatalf("expected first upload content, got %q", string(data))
+	}
+}
+
+func TestHandlerOneTimeUploadAllowsUploadWithoutDownload(t *testing.T) {
+	dir := t.TempDir()
+	dropDir := filepath.Join(dir, "drop")
+	if err := os.Mkdir(dropDir, 0o700); err != nil {
+		t.Fatalf("mkdir drop: %v", err)
+	}
+	oneTimeUploadDirs, err := ResolveOneTimeUploadDirs(dir, []string{"drop"})
+	if err != nil {
+		t.Fatalf("resolve one-time upload dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeUploadDirs = oneTimeUploadDirs
+
+	req := newRawUploadRequest("/drop/new.txt", "payload")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%q", rr.Code, rr.Body.String())
+	}
+	payload := parseUploadResponse(t, rr)
+	if payload.Uploaded != 1 || payload.Failed != 0 {
+		t.Fatalf("unexpected upload summary: %+v", payload)
+	}
+	if data, err := os.ReadFile(filepath.Join(dropDir, "new.txt")); err != nil || string(data) != "payload" {
+		t.Fatalf("expected uploaded file content, err=%v data=%q", err, string(data))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/drop/new.txt", nil)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected uploaded file download to be blocked with 404, got %d", rr.Code)
+	}
+}
+
+func TestHandlerOneTimeUploadDeniesOverwriteEvenWhenOverwriteEnabled(t *testing.T) {
+	dir := t.TempDir()
+	dropDir := filepath.Join(dir, "drop")
+	if err := os.Mkdir(dropDir, 0o700); err != nil {
+		t.Fatalf("mkdir drop: %v", err)
+	}
+	existing := filepath.Join(dropDir, "same.txt")
+	if err := os.WriteFile(existing, []byte("original"), 0o600); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	oneTimeUploadDirs, err := ResolveOneTimeUploadDirs(dir, []string{"drop"})
+	if err != nil {
+		t.Fatalf("resolve one-time upload dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.UploadOverwrite = true
+	h.OneTimeUploadDirs = oneTimeUploadDirs
+
+	req := newRawUploadRequest("/drop/same.txt", "replacement")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rr.Code, rr.Body.String())
+	}
+	payload := parseUploadResponse(t, rr)
+	if payload.Uploaded != 0 || payload.Failed != 1 || payload.Files[0].Message != "upload failed" {
+		t.Fatalf("unexpected overwrite response: %+v", payload)
+	}
+	data, err := os.ReadFile(existing)
+	if err != nil {
+		t.Fatalf("read existing file: %v", err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("expected existing file to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestHandlerOneTimeUploadRespectsMaxBytes(t *testing.T) {
+	dir := t.TempDir()
+	dropDir := filepath.Join(dir, "drop")
+	if err := os.Mkdir(dropDir, 0o700); err != nil {
+		t.Fatalf("mkdir drop: %v", err)
+	}
+	oneTimeUploadDirs, err := ResolveOneTimeUploadDirs(dir, []string{"drop"})
+	if err != nil {
+		t.Fatalf("resolve one-time upload dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeUploadDirs = oneTimeUploadDirs
+	h.UploadMaxBytes = 4
+
+	req := newRawUploadRequest("/drop/too-large.txt", "larger than four bytes")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%q", rr.Code, rr.Body.String())
+	}
+	payload := parseUploadResponse(t, rr)
+	if payload.Uploaded != 0 || payload.Failed != 1 || payload.Files[0].Message != "request entity too large" {
+		t.Fatalf("unexpected max bytes response: %+v", payload)
+	}
+	if _, err := os.Stat(filepath.Join(dropDir, "too-large.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected oversized upload to leave no file, stat err=%v", err)
 	}
 }
 

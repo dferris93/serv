@@ -31,6 +31,7 @@ type dirListingData struct {
 	Entries       []dirEntry
 	GeneratedAt   string
 	UploadEnabled bool
+	ShowListing   bool
 }
 
 var dirListingTemplate = template.Must(template.New("dir-listing").Parse(`<!doctype html>
@@ -335,7 +336,7 @@ var dirListingTemplate = template.Must(template.New("dir-listing").Parse(`<!doct
       </form>
     </div>
     {{end}}
-    <table>
+    {{if .ShowListing}}<table>
       <thead>
         <tr>
           <th>Name</th>
@@ -369,7 +370,7 @@ var dirListingTemplate = template.Must(template.New("dir-listing").Parse(`<!doct
         </tr>
         {{end}}
       </tbody>
-    </table>
+    </table>{{end}}
   </div>
   {{if .UploadEnabled}}
   <script>
@@ -545,45 +546,48 @@ func (h *Handler) serveDir(rw *logging.ResponseWriter, r *http.Request, fullPath
 	if len(filters) == 0 {
 		filters = security.DefaultEntryFilters()
 	}
+	hideListing := h.isOneTimeUploadDir(fullPath)
 	listing := make([]dirEntry, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		entryRel := name
-		if relPath != "" {
-			entryRel = path.Join(relPath, name)
-		}
-		entryCtx := security.EntryContext{
-			Dir:           h.Dir,
-			RelPath:       entryRel,
-			Name:          name,
-			AllowDotFiles: h.AllowDotFiles,
-			Sensitive:     h.Sensitive,
-			FilterGlobs:   h.FilterGlobs,
-		}
-		if !security.ApplyEntryFilters(filters, &entryCtx) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		href := path.Join(r.URL.Path, url.PathEscape(name))
-		iconClass := "file"
-		size := formatBytes(info.Size())
-		if entry.IsDir() {
-			name += "/"
-			href += "/"
-			iconClass = "dir"
-			size = "--"
-		}
+	if !hideListing {
+		for _, entry := range entries {
+			name := entry.Name()
+			entryRel := name
+			if relPath != "" {
+				entryRel = path.Join(relPath, name)
+			}
+			entryCtx := security.EntryContext{
+				Dir:           h.Dir,
+				RelPath:       entryRel,
+				Name:          name,
+				AllowDotFiles: h.AllowDotFiles,
+				Sensitive:     h.Sensitive,
+				FilterGlobs:   h.FilterGlobs,
+			}
+			if !security.ApplyEntryFilters(filters, &entryCtx) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			href := path.Join(r.URL.Path, url.PathEscape(name))
+			iconClass := "file"
+			size := formatBytes(info.Size())
+			if entry.IsDir() {
+				name += "/"
+				href += "/"
+				iconClass = "dir"
+				size = "--"
+			}
 
-		listing = append(listing, dirEntry{
-			Name:      name,
-			Href:      href,
-			Size:      size,
-			ModTime:   info.ModTime().Format("Jan 02, 2006 15:04"),
-			IconClass: iconClass,
-		})
+			listing = append(listing, dirEntry{
+				Name:      name,
+				Href:      href,
+				Size:      size,
+				ModTime:   info.ModTime().Format("Jan 02, 2006 15:04"),
+				IconClass: iconClass,
+			})
+		}
 	}
 
 	sort.Slice(listing, func(i, j int) bool {
@@ -600,10 +604,11 @@ func (h *Handler) serveDir(rw *logging.ResponseWriter, r *http.Request, fullPath
 		Path:          r.URL.Path,
 		Entries:       listing,
 		GeneratedAt:   time.Now().Format("Jan 02, 2006 15:04"),
-		UploadEnabled: h.UploadEnabled,
+		UploadEnabled: h.UploadEnabled || hideListing,
+		ShowListing:   !hideListing,
 	}
 
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/" && !hideListing {
 		parent := path.Dir(strings.TrimSuffix(r.URL.Path, "/"))
 		if parent == "." {
 			parent = "/"

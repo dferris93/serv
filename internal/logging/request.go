@@ -12,6 +12,7 @@ type ResponseWriter struct {
 	http.ResponseWriter
 	StatusCode int
 	Size       int
+	WriteErr   error
 }
 
 func NewResponseWriter(w http.ResponseWriter) *ResponseWriter {
@@ -26,6 +27,9 @@ func (w *ResponseWriter) WriteHeader(statusCode int) {
 func (w *ResponseWriter) Write(data []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(data)
 	w.Size += n
+	if err != nil && w.WriteErr == nil {
+		w.WriteErr = err
+	}
 	return n, err
 }
 

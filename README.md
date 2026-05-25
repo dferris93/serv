@@ -142,7 +142,7 @@ Files under `once` are deleted after a successful full `GET`. `HEAD`, conditiona
 mkdir -p /path/to/served/drop
 ./serv -dir /path/to/served -otu drop
 ```
-Directories configured with `-otu` show the upload UI, hide all entries, block direct file downloads, and reject uploads that would overwrite a file.
+Directories configured with `-otu` show the upload UI, hide all entries, block direct file downloads, store uploads as `name_<sha256>.ext` (or `name_<sha256>` when there is no extension), and reject uploads whose SHA-256 already exists in the directory.
 
 * TLS cert auth
 ```
@@ -224,7 +224,7 @@ curl -X POST --data-binary @./image.png  http://127.0.0.1:8889/uploads/image.png
 * `-otu` enables uploads only for the configured write-only directories, even when `-upload` is not set.
 * Uploads respect ACLs and security rules, including auth/IP restrictions, `-filter` patterns, dotfile policy, and sensitive file protections.
 * Upload requests can target a directory with multipart form data, or a specific file path via `POST /path/to/<filename>`.
-* `-otu` directories always reject overwrites, even when `-uploadoverwrite` is set.
+* `-otu` directories store uploads with a SHA-256 suffix and reject duplicate file content, even when `-uploadoverwrite` is set.
 * `.htaccess` uploads are always blocked.
 * custom headers will only be set if the request is successful
 * Access logs use Common Log Format (CLF):

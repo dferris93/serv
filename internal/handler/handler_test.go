@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
@@ -63,6 +65,11 @@ func parseUploadResponse(t *testing.T, rr *httptest.ResponseRecorder) uploadResp
 		t.Fatalf("parse upload response: %v body=%q", err, rr.Body.String())
 	}
 	return payload
+}
+
+func sha256Hex(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", sum)
 }
 
 func TestHandlerServesFile(t *testing.T) {
@@ -486,7 +493,9 @@ func TestHandlerOneTimeUploadAllowsUploadWithoutDownload(t *testing.T) {
 	h := newTestHandler(dir)
 	h.OneTimeUploadDirs = oneTimeUploadDirs
 
-	req := newRawUploadRequest("/drop/new.txt", "payload")
+	content := "payload"
+	expectedName := "new_" + sha256Hex(content) + ".txt"
+	req := newRawUploadRequest("/drop/new.txt", content)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -497,11 +506,17 @@ func TestHandlerOneTimeUploadAllowsUploadWithoutDownload(t *testing.T) {
 	if payload.Uploaded != 1 || payload.Failed != 0 {
 		t.Fatalf("unexpected upload summary: %+v", payload)
 	}
-	if data, err := os.ReadFile(filepath.Join(dropDir, "new.txt")); err != nil || string(data) != "payload" {
+	if len(payload.Files) != 1 || payload.Files[0].Name != expectedName || payload.Files[0].Status != "uploaded" {
+		t.Fatalf("unexpected upload file result: %+v", payload.Files)
+	}
+	if data, err := os.ReadFile(filepath.Join(dropDir, expectedName)); err != nil || string(data) != content {
 		t.Fatalf("expected uploaded file content, err=%v data=%q", err, string(data))
 	}
+	if _, err := os.Stat(filepath.Join(dropDir, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected original upload name to be absent, stat err=%v", err)
+	}
 
-	req = httptest.NewRequest(http.MethodGet, "/drop/new.txt", nil)
+	req = httptest.NewRequest(http.MethodGet, "/drop/"+expectedName, nil)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
@@ -509,7 +524,39 @@ func TestHandlerOneTimeUploadAllowsUploadWithoutDownload(t *testing.T) {
 	}
 }
 
-func TestHandlerOneTimeUploadDeniesOverwriteEvenWhenOverwriteEnabled(t *testing.T) {
+func TestHandlerOneTimeUploadUsesHashNameWithoutExtension(t *testing.T) {
+	dir := t.TempDir()
+	dropDir := filepath.Join(dir, "drop")
+	if err := os.Mkdir(dropDir, 0o700); err != nil {
+		t.Fatalf("mkdir drop: %v", err)
+	}
+	oneTimeUploadDirs, err := ResolveOneTimeUploadDirs(dir, []string{"drop"})
+	if err != nil {
+		t.Fatalf("resolve one-time upload dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeUploadDirs = oneTimeUploadDirs
+
+	content := "payload without extension"
+	expectedName := "name_" + sha256Hex(content)
+	req := newRawUploadRequest("/drop/name", content)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%q", rr.Code, rr.Body.String())
+	}
+	payload := parseUploadResponse(t, rr)
+	if payload.Uploaded != 1 || payload.Failed != 0 || payload.Files[0].Name != expectedName {
+		t.Fatalf("unexpected upload response: %+v", payload)
+	}
+	if data, err := os.ReadFile(filepath.Join(dropDir, expectedName)); err != nil || string(data) != content {
+		t.Fatalf("expected uploaded file content, err=%v data=%q", err, string(data))
+	}
+}
+
+func TestHandlerOneTimeUploadAllowsSameOriginalNameWithDifferentHash(t *testing.T) {
 	dir := t.TempDir()
 	dropDir := filepath.Join(dir, "drop")
 	if err := os.Mkdir(dropDir, 0o700); err != nil {
@@ -528,16 +575,18 @@ func TestHandlerOneTimeUploadDeniesOverwriteEvenWhenOverwriteEnabled(t *testing.
 	h.UploadOverwrite = true
 	h.OneTimeUploadDirs = oneTimeUploadDirs
 
-	req := newRawUploadRequest("/drop/same.txt", "replacement")
+	content := "replacement"
+	expectedName := "same_" + sha256Hex(content) + ".txt"
+	req := newRawUploadRequest("/drop/same.txt", content)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d body=%q", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%q", rr.Code, rr.Body.String())
 	}
 	payload := parseUploadResponse(t, rr)
-	if payload.Uploaded != 0 || payload.Failed != 1 || payload.Files[0].Message != "upload failed" {
-		t.Fatalf("unexpected overwrite response: %+v", payload)
+	if payload.Uploaded != 1 || payload.Failed != 0 || payload.Files[0].Name != expectedName {
+		t.Fatalf("unexpected upload response: %+v", payload)
 	}
 	data, err := os.ReadFile(existing)
 	if err != nil {
@@ -545,6 +594,50 @@ func TestHandlerOneTimeUploadDeniesOverwriteEvenWhenOverwriteEnabled(t *testing.
 	}
 	if string(data) != "original" {
 		t.Fatalf("expected existing file to remain unchanged, got %q", string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(dropDir, expectedName)); err != nil || string(data) != content {
+		t.Fatalf("expected hashed upload content, err=%v data=%q", err, string(data))
+	}
+}
+
+func TestHandlerOneTimeUploadRejectsDuplicateSHA256(t *testing.T) {
+	dir := t.TempDir()
+	dropDir := filepath.Join(dir, "drop")
+	if err := os.Mkdir(dropDir, 0o700); err != nil {
+		t.Fatalf("mkdir drop: %v", err)
+	}
+	oneTimeUploadDirs, err := ResolveOneTimeUploadDirs(dir, []string{"drop"})
+	if err != nil {
+		t.Fatalf("resolve one-time upload dirs: %v", err)
+	}
+
+	h := newTestHandler(dir)
+	h.OneTimeUploadDirs = oneTimeUploadDirs
+
+	content := "duplicate payload"
+	firstName := "first_" + sha256Hex(content) + ".jpg"
+	req := newRawUploadRequest("/drop/first.jpg", content)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected first upload 201, got %d body=%q", rr.Code, rr.Body.String())
+	}
+
+	req = newRawUploadRequest("/drop/second.png", content)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate upload 400, got %d body=%q", rr.Code, rr.Body.String())
+	}
+	payload := parseUploadResponse(t, rr)
+	if payload.Uploaded != 0 || payload.Failed != 1 || payload.Files[0].Message != "upload failed" {
+		t.Fatalf("unexpected duplicate response: %+v", payload)
+	}
+	if data, err := os.ReadFile(filepath.Join(dropDir, firstName)); err != nil || string(data) != content {
+		t.Fatalf("expected first upload content, err=%v data=%q", err, string(data))
+	}
+	if _, err := os.Stat(filepath.Join(dropDir, "second_"+sha256Hex(content)+".png")); !os.IsNotExist(err) {
+		t.Fatalf("expected duplicate upload file to be absent, stat err=%v", err)
 	}
 }
 

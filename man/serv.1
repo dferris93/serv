@@ -93,7 +93,8 @@ HEAD, conditional 304, and range 206 responses do not delete the file.
 .BR \-otu " " \fIPATH\fR
 Directory that accepts one-time uploads and blocks downloads.
 Can specify multiple. Relative paths are resolved under the served directory.
-These directories show upload controls, hide all entries, reject overwrites,
+These directories show upload controls, hide all entries,
+store uploads as name_sha256.ext, reject duplicate SHA-256 content,
 and return 404 for direct file downloads.
 .SH HTACCESS
 If a .htaccess file exists in a directory (or any parent up to the served root),

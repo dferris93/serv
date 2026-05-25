@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -272,6 +274,10 @@ func (h *Handler) storeUploadedContent(target uploadTarget, name string, src io.
 		return uploadFileResult{Name: name, Status: "error", Message: err.Error()}
 	}
 
+	if target.OneTimeUpload {
+		return h.storeOneTimeUploadedContent(target, name, src)
+	}
+
 	dstPath := filepath.Join(target.TargetDir, name)
 	key, err := filepath.Abs(dstPath)
 	if err != nil {
@@ -296,6 +302,170 @@ func (h *Handler) storeUploadedContent(target uploadTarget, name string, src io.
 	}
 
 	return uploadFileResult{Name: name, Status: "uploaded"}
+}
+
+func (h *Handler) storeOneTimeUploadedContent(target uploadTarget, originalName string, src io.Reader) uploadFileResult {
+	temp, err := os.CreateTemp("", "serv-upload-*")
+	if err != nil {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+
+	hasher := sha256.New()
+	copyErr := error(nil)
+	if _, err := io.Copy(io.MultiWriter(temp, hasher), src); err != nil {
+		copyErr = err
+	}
+	closeErr := temp.Close()
+	if copyErr != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(copyErr, &maxErr) {
+			return uploadFileResult{Name: originalName, Status: "error", Message: "request entity too large", HTTPStatus: http.StatusRequestEntityTooLarge}
+		}
+		return uploadFileResult{Name: originalName, Status: "error", Message: "failed to write file"}
+	}
+	if closeErr != nil {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "failed to write file"}
+	}
+
+	hash := hex.EncodeToString(hasher.Sum(nil))
+	scopeDir := h.oneTimeUploadScopeDir(target.TargetDir)
+	hashKey := scopeDir + "\x00" + hash
+	if !h.claimUpload(hashKey) {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	}
+	defer h.releaseUpload(hashKey)
+
+	if exists, err := directoryContainsSHA256(scopeDir, hash); err != nil {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	} else if exists {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	}
+
+	finalName := oneTimeUploadFilename(originalName, hash)
+	finalRelPath := finalName
+	if target.RelDir != "" {
+		finalRelPath = path.Join(target.RelDir, finalName)
+	}
+	if err := h.checkUploadACLs(finalRelPath); err != nil {
+		return uploadFileResult{Name: originalName, Status: "error", Message: err.Error()}
+	}
+
+	dstPath := filepath.Join(target.TargetDir, finalName)
+	key, err := filepath.Abs(dstPath)
+	if err != nil {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	}
+	key = filepath.Clean(key)
+	if !h.claimUpload(key) {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	}
+	defer h.releaseUpload(key)
+
+	temp, err = os.Open(tempPath)
+	if err != nil {
+		return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+	}
+	defer temp.Close()
+
+	if err := writeUploadedFile(dstPath, temp, false); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return uploadFileResult{Name: originalName, Status: "error", Message: "request entity too large", HTTPStatus: http.StatusRequestEntityTooLarge}
+		}
+		if errors.Is(err, os.ErrExist) {
+			return uploadFileResult{Name: originalName, Status: "error", Message: "upload failed"}
+		}
+		return uploadFileResult{Name: originalName, Status: "error", Message: "failed to write file"}
+	}
+
+	return uploadFileResult{Name: finalName, Status: "uploaded"}
+}
+
+func (h *Handler) oneTimeUploadScopeDir(targetDir string) string {
+	targetAbs, err := filepath.Abs(targetDir)
+	if err != nil {
+		return filepath.Clean(targetDir)
+	}
+	targetAbs = filepath.Clean(targetAbs)
+	if resolved, err := filepath.EvalSymlinks(targetAbs); err == nil {
+		targetAbs = filepath.Clean(resolved)
+	}
+
+	scope := targetAbs
+	for _, dir := range h.OneTimeUploadDirs {
+		dirAbs, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		dirAbs = filepath.Clean(dirAbs)
+		if resolved, err := filepath.EvalSymlinks(dirAbs); err == nil {
+			dirAbs = filepath.Clean(resolved)
+		}
+		if pathWithinDir(dirAbs, targetAbs, true) && len(dirAbs) <= len(scope) {
+			scope = dirAbs
+		}
+	}
+	return scope
+}
+
+func oneTimeUploadFilename(name string, hash string) string {
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	if base == "" {
+		base = name
+		ext = ""
+	}
+	return base + "_" + hash + ext
+}
+
+func directoryContainsSHA256(dir string, hash string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+
+	for _, entry := range entries {
+		fullPath := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			matches, err := directoryContainsSHA256(fullPath, hash)
+			if err != nil {
+				return false, err
+			}
+			if matches {
+				return true, nil
+			}
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			continue
+		}
+
+		matches, err := fileMatchesSHA256(fullPath, hash)
+		if err != nil {
+			return false, err
+		}
+		if matches {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func fileMatchesSHA256(filePath string, hash string) (bool, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return false, err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)) == hash, nil
 }
 
 func (h *Handler) claimUpload(key string) bool {

@@ -508,26 +508,41 @@ main() {
   port="${SERVER_PORT}"
   wait_for_url "http://127.0.0.1:${port}/hello.txt"
   expect_listing_absent "existing.txt" "http://127.0.0.1:${port}/drop/"
-  local otu_source otu_target otu_name otu_response otu_code
+  local otu_source otu_target otu_name otu_hash otu_stored_name otu_response otu_code
   otu_source="${TMP_DIR}/one-time-upload-source.txt"
   otu_name="new-upload.txt"
-  otu_target="${SITE_DIR}/drop/${otu_name}"
   otu_response="${TMP_DIR}/one-time-upload-response.json"
   printf "one-time upload payload" >"${otu_source}"
+  otu_hash="$(openssl dgst -sha256 -r "${otu_source}" 2>/dev/null | awk '{print $1}')"
+  otu_stored_name="new-upload_${otu_hash}.txt"
+  otu_target="${SITE_DIR}/drop/${otu_stored_name}"
   otu_code="$(curl --silent --show-error --output "${otu_response}" --write-out "%{http_code}" \
     -X POST --data-binary "@${otu_source}" "http://127.0.0.1:${port}/drop/${otu_name}")"
   if [[ "${otu_code}" != "201" ]]; then
     fail "expected HTTP 201 for one-time upload, got ${otu_code} body=$(cat "${otu_response}")"
   fi
   expect_file_content "one-time upload payload" "${otu_target}"
-  expect_status "404" "http://127.0.0.1:${port}/drop/${otu_name}"
-  expect_listing_absent "${otu_name}" "http://127.0.0.1:${port}/drop/"
+  expect_file_absent "${SITE_DIR}/drop/${otu_name}"
+  expect_status "404" "http://127.0.0.1:${port}/drop/${otu_stored_name}"
+  expect_listing_absent "${otu_stored_name}" "http://127.0.0.1:${port}/drop/"
+
   otu_code="$(curl --silent --show-error --output "${otu_response}" --write-out "%{http_code}" \
     -X POST --data-binary "@${otu_source}" "http://127.0.0.1:${port}/drop/existing.txt")"
   if [[ "${otu_code}" != "400" ]]; then
-    fail "expected HTTP 400 for one-time upload overwrite, got ${otu_code} body=$(cat "${otu_response}")"
+    fail "expected HTTP 400 for one-time upload duplicate sha256, got ${otu_code} body=$(cat "${otu_response}")"
   fi
   expect_file_content "existing upload" "${SITE_DIR}/drop/existing.txt"
+
+  printf "replacement content" >"${otu_source}"
+  otu_hash="$(openssl dgst -sha256 -r "${otu_source}" 2>/dev/null | awk '{print $1}')"
+  otu_stored_name="existing_${otu_hash}.txt"
+  otu_code="$(curl --silent --show-error --output "${otu_response}" --write-out "%{http_code}" \
+    -X POST --data-binary "@${otu_source}" "http://127.0.0.1:${port}/drop/existing.txt")"
+  if [[ "${otu_code}" != "201" ]]; then
+    fail "expected HTTP 201 for one-time upload with reused filename and different sha256, got ${otu_code} body=$(cat "${otu_response}")"
+  fi
+  expect_file_content "existing upload" "${SITE_DIR}/drop/existing.txt"
+  expect_file_content "replacement content" "${SITE_DIR}/drop/${otu_stored_name}"
   stop_server
 
   log "testing HTTP allowdotfiles + insecure"

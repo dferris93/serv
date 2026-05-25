@@ -19,6 +19,15 @@ cd serv
 make
 ```
 
+### Release Artifacts
+
+GitHub Actions runs unit tests, then integration tests, then packaging. Pull
+requests and branch pushes build snapshot artifacts; tags matching `v*` publish
+a GitHub Release.
+
+The release pipeline builds Linux `x86_64` and `arm64` binaries, plus `.deb` and
+`.rpm` packages for both architectures.
+
 ### Running
 By default, serv will run on 127.0.0.1:8889
 

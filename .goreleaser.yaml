@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: serv
+
+builds:
+  - id: serv
+    main: .
+    binary: serv
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - id: binaries
+    ids:
+      - serv
+    formats:
+      - binary
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+
+nfpms:
+  - id: linux-packages
+    ids:
+      - serv
+    package_name: serv
+    vendor: dferris93
+    homepage: https://github.com/dferris93/serv
+    maintainer: dferris93 <dferris93@users.noreply.github.com>
+    description: Lightweight HTTP/HTTPS file server with access controls.
+    license: MIT
+    section: utils
+    priority: optional
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+    file_name_template: >-
+      {{ .PackageName }}_{{ .Version }}_linux_{{ if eq .Arch "amd64" }}x86_64{{ else if eq .Arch "arm64" }}arm64{{ else }}{{ .Arch }}{{ end }}
+    contents:
+      - src: man/serv.1
+        dst: /usr/share/man/man1/serv.1
+        file_info:
+          mode: 0644
+      - src: LICENSE
+        dst: /usr/share/doc/serv/LICENSE
+        file_info:
+          mode: 0644
+      - src: README.md
+        dst: /usr/share/doc/serv/README.md
+        file_info:
+          mode: 0644
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
